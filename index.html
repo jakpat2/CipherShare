@@ -395,20 +395,22 @@ function setupConnection(conn) {
     }
     
     // 2. Handle Encrypted Data Chunks
-    else if (data.chunk) {
+    if (data.chunk) {
+        // Ensure the progress area shows up
         if (document.getElementById('progress-area').style.display === 'none') {
             document.getElementById('progress-area').style.display = 'block';
-            transfer.startTime = Date.now();
+            if (!transfer.startTime) transfer.startTime = Date.now();
         }
 
-        const chunkToDecrypt = data.chunk instanceof Uint8Array ? data.chunk.buffer : data.chunk;
+        const chunkBuffer = data.chunk instanceof Uint8Array ? data.chunk.buffer : data.chunk;
 
+        // Decrypt the chunk
         cryptoWorker.postMessage({ 
             type: 'DECRYPT', 
-            chunk: chunkToDecrypt, 
+            chunk: chunkBuffer, 
             iv: new Uint8Array(data.iv), 
             key: transfer.key 
-        }, [chunkToDecrypt]);
+        }, [chunkBuffer]);
     }
 });
 
@@ -435,23 +437,26 @@ function setupConnection(conn) {
 
     // --- RECEIVER LOGIC ---
     if (type === 'DECRYPTED_READY') {
-        const data = new Uint8Array(decrypted);
-        
+    const data = new Uint8Array(decrypted);
+    
+    try {
         if (transfer.controller) {
+            // This sends the data to the Service Worker download
             await transfer.controller.write(data);
-        } else if (transfer.writable) {
-            await transfer.writable.write(data);
-        } else {
-            transfer.chunks.push(data);
-        }
-        
-        // Receiver counts ONLY after decryption/writing is done
-        transfer.bytes += data.byteLength;
-        updateUI(transfer.bytes, transfer.size);
+            
+            // Increment bytes AFTER successful write
+            transfer.bytes += data.byteLength;
+            updateUI(transfer.bytes, transfer.size);
 
-        // Tell sender we are ready for the next chunk
-        currentConn.send({ type: 'ACK_NEXT' }); 
+            // Tell sender we are ready for the next piece
+            currentConn.send({ type: 'ACK_NEXT' }); 
+        } else {
+            console.error("No stream controller found!");
+        }
+    } catch (err) {
+        console.error("Stream Write Error:", err);
     }
+}
 };
     async function sendRequest() {
         updateStatus(`Sending to ${partnerName}...`, true);
