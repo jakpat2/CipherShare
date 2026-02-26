@@ -416,57 +416,43 @@ function setupConnection(conn) {
 }
 
     cryptoWorker.onmessage = async (e) => {
-        const { type, hash, encrypted, iv, decrypted, msg } = e.data;
+    const { type, hash, encrypted, iv, decrypted, msg } = e.data;
 
-        if (type === 'ERROR') {
-            console.error("Worker Error:", msg);
-            return;
-        }
-
-        // --- SENDER LOGIC ---
-        if (type === 'HASH_DONE') {
-            const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
-            const keyData = await crypto.subtle.exportKey("jwk", key);
-            transfer.key = key;
-            transfer.hash = hash;
-            currentConn.send({ type: 'request', name: selectedFile.name, size: selectedFile.size, sender: myName, hash, keyData });
-            updateStatus("Awaiting approval...", true);
-        }
-
-        if (type === 'CHUNK_READY') {
-            // Backpressure check
-            if (currentConn.dataChannel.bufferedAmount > 1048576) {
-                await new Promise(r => {
-                    currentConn.dataChannel.onbufferedamountlow = () => {
-                        currentConn.dataChannel.onbufferedamountlow = null;
-                        r();
-                    };
-                });
-            }
-            currentConn.send({ chunk: encrypted, iv: Array.from(iv) });
-            transfer.bytes += encrypted.byteLength; 
-            updateUI(transfer.bytes, selectedFile.size);
-        }
-
-        // --- RECEIVER LOGIC ---
-        if (type === 'DECRYPTED_READY') {
-    const data = new Uint8Array(decrypted);
-    
-    if (transfer.controller) {
-        await transfer.controller.write(data);
-    } else if (transfer.writable) {
-        await transfer.writable.write(data);
-    } else {
-        transfer.chunks.push(data);
+    if (type === 'ERROR') {
+        console.error("Worker Error:", msg);
+        return;
     }
-    
-    transfer.bytes += data.byteLength;
-    updateUI(transfer.bytes, transfer.size);
 
-    // SEND ACKNOWLEDGEMENT: Tell the sender we are ready for the next one
-    currentConn.send({ type: 'ACK_NEXT' }); 
-}
-    };
+    // --- SENDER LOGIC ---
+    if (type === 'HASH_DONE') {
+        const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+        const keyData = await crypto.subtle.exportKey("jwk", key);
+        transfer.key = key;
+        transfer.hash = hash;
+        currentConn.send({ type: 'request', name: selectedFile.name, size: selectedFile.size, sender: myName, hash, keyData });
+        updateStatus("Awaiting approval...", true);
+    }
+
+    // --- RECEIVER LOGIC ---
+    if (type === 'DECRYPTED_READY') {
+        const data = new Uint8Array(decrypted);
+        
+        if (transfer.controller) {
+            await transfer.controller.write(data);
+        } else if (transfer.writable) {
+            await transfer.writable.write(data);
+        } else {
+            transfer.chunks.push(data);
+        }
+        
+        // Receiver counts ONLY after decryption/writing is done
+        transfer.bytes += data.byteLength;
+        updateUI(transfer.bytes, transfer.size);
+
+        // Tell sender we are ready for the next chunk
+        currentConn.send({ type: 'ACK_NEXT' }); 
+    }
+};
     async function sendRequest() {
         updateStatus(`Sending to ${partnerName}...`, true);
         if (!selectedFile || !currentConn) return;
@@ -491,8 +477,6 @@ function setupConnection(conn) {
 
             for (let i = 0; i < value.length; i += CHUNK_SIZE) {
                 const subChunk = value.slice(i, i + CHUNK_SIZE);
-                
-                // FIX: Get the raw ArrayBuffer for the transfer list
                 const bufferToTransfer = subChunk.buffer.slice(subChunk.byteOffset, subChunk.byteOffset + subChunk.byteLength);
 
                 // 1. Encrypt via Worker
@@ -502,13 +486,8 @@ function setupConnection(conn) {
                         if (e.data.type === 'CHUNK_READY') {
                             cryptoWorker.removeEventListener('message', handleWorker);
                             resolve(e.data);
-                        } else if (e.data.type === 'ERROR') {
-                            reject(e.data.msg);
                         }
                     };
-                    cryptoWorker.addEventListener('message', handleWorker);
-                    
-                    // Passing bufferToTransfer in the [list] makes it zero-copy
                     cryptoWorker.postMessage({ 
                         type: 'ENCRYPT', 
                         chunk: bufferToTransfer, 
@@ -517,15 +496,16 @@ function setupConnection(conn) {
                     }, [bufferToTransfer]);
                 });
 
-                // 2. Set up ACK listener with a long timeout (30s) for mobile pickers
+                // 2. Set up ACK listener (60s for mobile folder picking)
                 const ackPromise = new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
                         currentConn.off('data', handler);
                         reject("Receiver timed out (picking folder too long?)");
-                    }, 30000); 
+                    }, 60000); 
 
                     const handler = (data) => {
-                        if (data.type === 'ACK_NEXT') {
+                        if (data.type === 'ACK_NEXT' || data.type === 'HEARTBEAT') {
+                            if (data.type === 'HEARTBEAT') return;
                             currentConn.off('data', handler);
                             clearTimeout(timeout);
                             resolve();
@@ -534,14 +514,15 @@ function setupConnection(conn) {
                     currentConn.on('data', handler);
                 });
 
-                // 3. Send the encrypted chunk
+                // 3. Send and Update Sender UI
                 currentConn.send({ chunk: encryptedData.encrypted, iv: Array.from(encryptedData.iv) });
                 
-                // 4. Wait for receiver to save and ask for more
-                await ackPromise; 
-
+                // Sender updates its own UI based on what it just pushed
                 transfer.bytes += subChunk.byteLength;
                 updateUI(transfer.bytes, selectedFile.size);
+
+                // 4. Wait for receiver to save
+                await ackPromise; 
             }
         }
         
@@ -597,26 +578,23 @@ function setupConnection(conn) {
                 readableStream: ts.readable 
             }, [ts.readable]);
 
-            // GIVE THE DEVICE TIME TO OPEN THE DOWNLOAD
             const a = document.createElement('a');
             a.href = `./download-p2p/${encodeURIComponent(transfer.name)}`;
-            document.body.appendChild(a);
             a.click();
-            document.body.removeChild(a);
             
-            // CRITICAL: Wait 1 second here to ensure the browser 
-            // has initialized the download before telling the sender to start.
-            await new Promise(r => setTimeout(r, 1000));
+            // Give the Mobile OS 2 seconds to finish opening the "Save As" prompt
+            await new Promise(r => setTimeout(r, 2000));
         }
 
         isBusy = true; 
         refreshUI();
         
         // Final "I'm ready" signal
+        console.log("Receiver ready, signaling sender...");
         currentConn.send({ type: 'receiver_ready' }); 
         
     } catch (e) {
-        console.error("User canceled or Setup failed:", e);
+        console.error("Setup failed:", e);
         resetTransfer();
     }
 };
