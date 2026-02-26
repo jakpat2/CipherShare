@@ -492,48 +492,66 @@ function setupConnection(conn) {
             for (let i = 0; i < value.length; i += CHUNK_SIZE) {
                 const subChunk = value.slice(i, i + CHUNK_SIZE);
                 
-                // Use the Worker for encryption to keep UI smooth
-                const encryptedData = await new Promise((resolve) => {
+                // FIX: Get the raw ArrayBuffer for the transfer list
+                const bufferToTransfer = subChunk.buffer.slice(subChunk.byteOffset, subChunk.byteOffset + subChunk.byteLength);
+
+                // 1. Encrypt via Worker
+                const encryptedData = await new Promise((resolve, reject) => {
                     const iv = crypto.getRandomValues(new Uint8Array(12));
                     const handleWorker = (e) => {
                         if (e.data.type === 'CHUNK_READY') {
                             cryptoWorker.removeEventListener('message', handleWorker);
                             resolve(e.data);
+                        } else if (e.data.type === 'ERROR') {
+                            reject(e.data.msg);
                         }
                     };
                     cryptoWorker.addEventListener('message', handleWorker);
+                    
+                    // Passing bufferToTransfer in the [list] makes it zero-copy
                     cryptoWorker.postMessage({ 
                         type: 'ENCRYPT', 
-                        chunk: subChunk, 
+                        chunk: bufferToTransfer, 
                         key: transfer.key, 
                         iv: iv 
-                    }, [subChunk]);
+                    }, [bufferToTransfer]);
                 });
 
-                // Set up ACK listener BEFORE sending
-                const ackPromise = new Promise((resolve) => {
+                // 2. Set up ACK listener with a long timeout (30s) for mobile pickers
+                const ackPromise = new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => {
+                        currentConn.off('data', handler);
+                        reject("Receiver timed out (picking folder too long?)");
+                    }, 30000); 
+
                     const handler = (data) => {
                         if (data.type === 'ACK_NEXT') {
                             currentConn.off('data', handler);
+                            clearTimeout(timeout);
                             resolve();
                         }
                     };
                     currentConn.on('data', handler);
                 });
 
+                // 3. Send the encrypted chunk
                 currentConn.send({ chunk: encryptedData.encrypted, iv: Array.from(encryptedData.iv) });
                 
-                await ackPromise; // Wait for receiver to process
+                // 4. Wait for receiver to save and ask for more
+                await ackPromise; 
 
                 transfer.bytes += subChunk.byteLength;
                 updateUI(transfer.bytes, selectedFile.size);
             }
         }
+        
         currentConn.send({ type: 'done', finalHash: transfer.hash });
         logHistory(selectedFile.name, selectedFile.size, 'sent');
         setTimeout(resetTransfer, 1000);
+        
     } catch (err) {
         console.error("Transfer error:", err);
+        alert("Transfer failed: " + err);
         resetTransfer();
     }
 }
@@ -675,57 +693,77 @@ function setupConnection(conn) {
     zone.addEventListener('click', () => { if(!isBusy) document.getElementById('file-input').click(); });
 
     function resetTransfer() {
-    isBusy = false;
-    if (wakeLock) { wakeLock.release(); wakeLock = null; }
-    document.getElementById('progress-area').style.display = 'none';
+    isBusy = false; 
+    if (wakeLock) { try { wakeLock.release(); } catch(e) {} wakeLock = null; }
     
+    // UI Reset
+    document.getElementById('progress-area').style.display = 'none';
     document.getElementById('progress-bar').value = 0;
     document.getElementById('progress-text').innerText = "0%";
     document.getElementById('speed-text').innerText = "0.0 MB/s";
     
     document.getElementById('file-label').innerText = "Drag & Drop or Tap to select";
+    document.getElementById('file-size-display').innerText = "";
     document.getElementById('drop-zone').classList.remove('has-file');
+    
+    // Clear the internal state
     selectedFile = null;
-    transfer = { chunks: [], writable: null, controller: null, bytes: 0, size: 0 };
+    document.getElementById('file-input').value = ""; // Allows re-selecting same file
+    transfer = { chunks: [], writable: null, controller: null, bytes: 0, size: 0, startTime: 0 };
+    
     refreshUI();
 }
 
-    function disconnectPeer() {
-        if (currentConn) currentConn.close();
+function disconnectPeer() {
+    if (currentConn) {
+        currentConn.close();
         currentConn = null;
-        updateStatus("Online", true); 
-        document.getElementById('disconnect-btn').style.display = 'none';
-        resetTransfer();
     }
+    updateStatus("Online", true); 
+    document.getElementById('disconnect-btn').style.display = 'none';
+    document.getElementById('connection-type').innerText = "";
+    resetTransfer();
+}
 
-    function updateStatus(txt, on) {
-        document.getElementById('status-text').innerText = txt;
-        document.getElementById('status-dot').className = on ? 'dot online' : 'dot';
-    }
+function updateStatus(txt, on) {
+    document.getElementById('status-text').innerText = txt;
+    document.getElementById('status-dot').className = on ? 'dot online' : 'dot';
+}
 
-    function logHistory(name, size, type) {
-        const item = document.createElement('div');
-        item.className = 'history-item';
-        item.innerHTML = `<strong>${type==='sent'?'📤':'📥'}</strong> ${name} (${(size/1048576).toFixed(1)}MB)`;
-        document.getElementById('history-list').prepend(item);
-    }
+function logHistory(name, size, type) {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.innerHTML = `<strong>${type === 'sent' ? '📤' : '📥'}</strong> ${name} (${(size / 1048576).toFixed(1)}MB)`;
+    document.getElementById('history-list').prepend(item);
+}
 
-    function copyMyId() {
-        navigator.clipboard.writeText(document.getElementById('my-id').innerText);
+function copyMyId() {
+    const id = document.getElementById('my-id').innerText;
+    if (id && id !== "---") {
+        navigator.clipboard.writeText(id);
         alert("ID Copied!");
     }
+}
 
-    function renameDevice() {
-        const n = prompt("New device name:", myName);
-        if(n) { myName = n; sessionStorage.setItem('cipherName', n); document.getElementById('display-name').innerText = n; }
+function renameDevice() {
+    const n = prompt("New device name:", myName);
+    if (n) { 
+        myName = n; 
+        sessionStorage.setItem('cipherName', n); 
+        document.getElementById('display-name').innerText = n; 
+        if (currentConn && currentConn.open) {
+            currentConn.send({ type: 'identity', name: myName });
+        }
     }
+}
 
-    function autoConnect(id) {
-        if (id.length > 10 && (!currentConn || !currentConn.open)) setupConnection(peer.connect(id));
+function autoConnect(id) {
+    if (id.length > 10 && (!currentConn || !currentConn.open)) {
+        setupConnection(peer.connect(id));
     }
+}
 
 let html5Scanner = null;
-
 function toggleScanner() {
     let r = document.getElementById('reader');
     if (r.style.display === 'block') {
@@ -745,11 +783,17 @@ function toggleScanner() {
     }
 }
 
-    function refreshUI() {
-        document.getElementById('send-btn').disabled = !(selectedFile && currentConn && currentConn.open && !isBusy);
+function refreshUI() {
+    const isConnected = currentConn && currentConn.open;
+    document.getElementById('send-btn').disabled = !(selectedFile && isConnected && !isBusy);
+    document.getElementById('disconnect-btn').style.display = isConnected ? 'block' : 'none';
+}
+
+window.onbeforeunload = (e) => {
+    if (isBusy) {
+        e.preventDefault();
+        return "A file transfer is in progress. Are you sure you want to leave?";
     }
-    window.onbeforeunload = () => {
-    if (isBusy) return "A file transfer is in progress. Are you sure you want to leave?";
 };
 async function loadReadme() {
         try {
