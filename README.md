@@ -6,6 +6,8 @@
 
 CipherShare is a specialized web tool designed for secure, direct file sharing. By bypassing central servers, it ensures maximum privacy and utilizes the full speed of your local network.
 
+**CipherShare is currently in alpha stages.**
+
 ## 🚀 Key Technical Features
 
 * **True P2P Connectivity**: Leverages **WebRTC** via PeerJS to establish a direct data channel between browsers, ensuring data never touches a third-party server.
