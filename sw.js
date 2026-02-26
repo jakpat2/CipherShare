@@ -27,7 +27,7 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
     // Intercept the virtual download URL
-    if (url.pathname.includes('/download-p2p/')) {
+    if (url.href.includes('download-p2p/')) {
         const fileName = decodeURIComponent(url.pathname.split('/').pop());
         const streamData = streamMap.get(fileName);
 
@@ -75,3 +75,4 @@ self.onmessage = (event) => {
         }
     }
 };
+
