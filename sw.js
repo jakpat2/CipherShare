@@ -1,42 +1,64 @@
 const CACHE_NAME = 'ciphershare';
-const ASSETS = ['index.html', 'manifest.json'];
-const map = new Map();
+const ASSETS = [
+    'index.html',
+    'manifest.json',
+    'CipherShare-logo.png'
+];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
-});
+const streamMap = new Map();
 
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  if (url.pathname.includes('/download-p2p/')) {
-    const fileName = decodeURIComponent(url.pathname.split('/').pop());
-    const streamData = map.get(fileName);
-    if (streamData) {
-      map.delete(fileName);
-      e.respondWith(new Response(streamData.stream, {
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'Content-Disposition': `attachment; filename="${encodeURIComponent(fileName)}"`,
-          'Content-Length': streamData.size
-        }
-      }));
-      return;
-    }
-  }
-  e.respondWith(caches.match(e.request).then(res => res || fetch(e.request)));
-});
-
-self.onmessage = (event) => {
-  if (event.data.type === 'INITIALIZE_STREAM') {
-    const { fileName, fileSize, readableStream } = event.data;
-    map.set(fileName, { stream: readableStream, size: fileSize });
-    event.ports[0].postMessage({ status: 'READY' });
-  }
-};
 self.addEventListener('install', (event) => {
     self.skipWaiting();
+    event.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+    );
 });
 
 self.addEventListener('activate', (event) => {
     event.waitUntil(clients.claim());
 });
+
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+
+    if (url.pathname.includes('/download-p2p/')) {
+        const fileName = decodeURIComponent(url.pathname.split('/').pop());
+        const streamData = streamMap.get(fileName);
+
+        if (streamData) {
+            streamMap.delete(fileName);
+
+            const headers = new Headers({
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+                'Content-Length': streamData.size,
+                'Cache-Control': 'no-cache',
+                'X-Content-Type-Options': 'nosniff'
+            });
+
+            event.respondWith(new Response(streamData.stream, { headers }));
+            return;
+        }
+    }
+
+    event.respondWith(
+        caches.match(event.request).then((response) => {
+            return response || fetch(event.request);
+        })
+    );
+});
+
+self.onmessage = (event) => {
+    if (event.data.type === 'INITIALIZE_STREAM') {
+        const { fileName, fileSize, readableStream } = event.data;
+
+        streamMap.set(fileName, { 
+            stream: readableStream, 
+            size: fileSize 
+        });
+
+        if (event.ports && event.ports[0]) {
+            event.ports[0].postMessage({ status: 'READY' });
+        }
+    }
+};
