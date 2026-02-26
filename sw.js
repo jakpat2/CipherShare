@@ -33,3 +33,10 @@ self.onmessage = (event) => {
     event.ports[0].postMessage({ status: 'READY' });
   }
 };
+self.addEventListener('install', (event) => {
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(clients.claim());
+});
