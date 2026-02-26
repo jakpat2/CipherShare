@@ -35,13 +35,13 @@ self.addEventListener('fetch', (event) => {
             // Clean up the map after retrieval to prevent memory leaks
             streamMap.delete(fileName);
 
-            const headers = new Headers({
-                'Content-Type': 'application/octet-stream',
-                'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-                'Content-Length': streamData.size, // Provides a progress bar in the browser UI
-                'Cache-Control': 'no-cache',
-                'X-Content-Type-Options': 'nosniff'
-            });
+const headers = new Headers({
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    'Content-Length': streamData.size, // <--- CRITICAL for progress bars and stability
+    'Cache-Control': 'no-cache',
+    'X-Content-Type-Options': 'nosniff'
+});
 
             // Return the stream as a standard HTTP Response
             event.respondWith(new Response(streamData.stream, { headers }));
@@ -75,4 +75,5 @@ self.onmessage = (event) => {
         }
     }
 };
+
 
