@@ -21,13 +21,11 @@ self.addEventListener('activate', (event) => {
     event.waitUntil(clients.claim());
 });
 
-
-
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
     // Intercept the virtual download URL
-    if (url.href.includes('download-p2p/')) {
+    if (url.pathname.includes('download-p2p/')) {
         const fileName = decodeURIComponent(url.pathname.split('/').pop());
         const streamData = streamMap.get(fileName);
 
@@ -35,13 +33,13 @@ self.addEventListener('fetch', (event) => {
             // Clean up the map after retrieval to prevent memory leaks
             streamMap.delete(fileName);
 
-const headers = new Headers({
-    'Content-Type': 'application/octet-stream',
-    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-    'Content-Length': streamData.size, // <--- CRITICAL for progress bars and stability
-    'Cache-Control': 'no-cache',
-    'X-Content-Type-Options': 'nosniff'
-});
+            const headers = new Headers({
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+                'Content-Length': streamData.size, // CRITICAL: Tells mobile browsers the file size
+                'Cache-Control': 'no-cache',
+                'X-Content-Type-Options': 'nosniff' // Prevents browser from "sniffing" and buffering RAM
+            });
 
             // Return the stream as a standard HTTP Response
             event.respondWith(new Response(streamData.stream, { headers }));
@@ -75,5 +73,3 @@ self.onmessage = (event) => {
         }
     }
 };
-
-
