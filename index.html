@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <link rel="icon" type="image/png" href="CipherShare-logo.png">
+    <link rel="manifest" href="manifest.json">
     <title>CipherShare</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
@@ -165,6 +166,20 @@ button:active {
 #send-btn:not(:disabled) {
     background: var(--success) !important;
     box-shadow: 0 4px 14px 0 rgba(34, 197, 94, 0.39);
+}
+
+progress {
+    appearance: none;
+    -webkit-appearance: none;
+}
+progress::-webkit-progress-bar {
+    background-color: #334155;
+    border-radius: 10px;
+}
+progress::-webkit-progress-value {
+    background: var(--primary);
+    border-radius: 10px;
+    transition: width 0.2s ease;
 }
     </style>
 </head>
@@ -335,63 +350,80 @@ function setupConnection(conn) {
         const statsInterval = setInterval(async () => {
             if (!currentConn || !currentConn.open) {
                 clearInterval(statsInterval);
-                const connTypeEl = document.getElementById('connection-type');
-                if (connTypeEl) connTypeEl.innerText = "";
+                if (document.getElementById('connection-type')) document.getElementById('connection-type').innerText = "";
                 return;
             }
-
             try {
                 const stats = await currentConn.peerConnection.getStats();
                 stats.forEach(report => {
                     if (report.type === 'remote-candidate') {
-                        let type = report.candidateType; 
-                        let displayType = "";
-                        
-                        switch(type) {
-                            case 'host': displayType = "(Local)"; break;
-                            case 'srflx': displayType = "(P2P)"; break;
-                            case 'relay': displayType = "(Bypass Active)"; break;
-                            default: displayType = `(${type})`;
-                        }
-                        const connTypeEl = document.getElementById('connection-type');
-                        if (connTypeEl) connTypeEl.innerText = displayType;
+                        let displayType = `(${report.candidateType})`;
+                        if (report.candidateType === 'host') displayType = "(Local)";
+                        if (report.candidateType === 'srflx') displayType = "(P2P)";
+                        if (report.candidateType === 'relay') displayType = "(Bypass Active)";
+                        document.getElementById('connection-type').innerText = displayType;
                     }
                 });
-            } catch (e) {
-            }
+            } catch (e) {}
         }, 2000);
     });
 
     currentConn.on('data', async (data) => {
-        if (data.type === 'identity') { 
-            partnerName = data.name; 
-            updateStatus(`Linked to ${partnerName}`, true); 
-            refreshUI();
+
+    // 1. Handle Signal Types
+    if (data.type === 'identity') { 
+        partnerName = data.name; 
+        updateStatus(`Linked to ${partnerName}`, true); 
+        refreshUI();
+    }
+    else if (data.type === 'receiver_ready') {
+        updateStatus("Sending...", true);
+        beginSending(); 
+    }
+    else if (data.type === 'request') {
+        handleFileRequest(data);
+    }
+    else if (data.type === 'declined') {
+        updateStatus("Transfer Declined", false);
+        isBusy = false;
+        refreshUI();
+    }
+    else if (data.type === 'done') {
+        finalizeFile(data.finalHash);
+    }
+    else if (data.type === 'ACK_NEXT') {
+    }
+    
+    // 2. Handle Encrypted Data Chunks
+    else if (data.chunk) {
+        if (document.getElementById('progress-area').style.display === 'none') {
+            document.getElementById('progress-area').style.display = 'block';
+            transfer.startTime = Date.now();
         }
-        else if (data.type === 'declined') {
-            updateStatus("Transfer Declined", false);
-            isBusy = false;
-            refreshUI();
-        }
-        else if (data.type === 'request') handleFileRequest(data);
-        else if (data.type === 'start_now') beginSending();
-        else if (data.type === 'done') finalizeFile(data.finalHash);
-        else if (data.chunk) {
-            cryptoWorker.postMessage({ 
-                type: 'DECRYPT', 
-                chunk: data.chunk, 
-                iv: new Uint8Array(data.iv), 
-                key: transfer.key 
-            }, [data.chunk]);
-        }
-    });
+
+        const chunkToDecrypt = data.chunk instanceof Uint8Array ? data.chunk.buffer : data.chunk;
+
+        cryptoWorker.postMessage({ 
+            type: 'DECRYPT', 
+            chunk: chunkToDecrypt, 
+            iv: new Uint8Array(data.iv), 
+            key: transfer.key 
+        }, [chunkToDecrypt]);
+    }
+});
 
     currentConn.on('close', disconnectPeer);
 }
 
     cryptoWorker.onmessage = async (e) => {
-        const { type, hash, encrypted, iv, decrypted } = e.data;
+        const { type, hash, encrypted, iv, decrypted, msg } = e.data;
 
+        if (type === 'ERROR') {
+            console.error("Worker Error:", msg);
+            return;
+        }
+
+        // --- SENDER LOGIC ---
         if (type === 'HASH_DONE') {
             const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
             const keyData = await crypto.subtle.exportKey("jwk", key);
@@ -402,22 +434,39 @@ function setupConnection(conn) {
         }
 
         if (type === 'CHUNK_READY') {
-            currentConn.send({ chunk: encrypted, iv: Array.from(iv) });
-        }
-
-        if (type === 'DECRYPTED_READY') {
-            if (transfer.writable) {
-                // Handle both FileSystem API and Service Worker Stream
-                if (transfer.writable.write) await transfer.writable.write(decrypted);
-                else transfer.controller.enqueue(new Uint8Array(decrypted));
-            } else {
-                transfer.chunks.push(decrypted);
+            // Backpressure check
+            if (currentConn.dataChannel.bufferedAmount > 1048576) {
+                await new Promise(r => {
+                    currentConn.dataChannel.onbufferedamountlow = () => {
+                        currentConn.dataChannel.onbufferedamountlow = null;
+                        r();
+                    };
+                });
             }
-            transfer.bytes += decrypted.byteLength;
-            updateUI(transfer.bytes, transfer.size);
+            currentConn.send({ chunk: encrypted, iv: Array.from(iv) });
+            transfer.bytes += encrypted.byteLength; 
+            updateUI(transfer.bytes, selectedFile.size);
         }
-    };
 
+        // --- RECEIVER LOGIC ---
+        if (type === 'DECRYPTED_READY') {
+    const data = new Uint8Array(decrypted);
+    
+    if (transfer.controller) {
+        await transfer.controller.write(data);
+    } else if (transfer.writable) {
+        await transfer.writable.write(data);
+    } else {
+        transfer.chunks.push(data);
+    }
+    
+    transfer.bytes += data.byteLength;
+    updateUI(transfer.bytes, transfer.size);
+
+    // SEND ACKNOWLEDGEMENT: Tell the sender we are ready for the next one
+    currentConn.send({ type: 'ACK_NEXT' }); 
+}
+    };
     async function sendRequest() {
         updateStatus(`Sending to ${partnerName}...`, true);
         if (!selectedFile || !currentConn) return;
@@ -427,35 +476,79 @@ function setupConnection(conn) {
     }
 
     async function beginSending() {
-        try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
-        document.getElementById('progress-area').style.display = 'block';
-        transfer.startTime = Date.now();
-        
-        const stream = selectedFile.stream();
-        const reader = stream.getReader();
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+    document.getElementById('progress-area').style.display = 'block';
+    transfer.startTime = Date.now();
+    transfer.bytes = 0; 
+    
+    const stream = selectedFile.stream();
+    const reader = stream.getReader();
 
+    try {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
 
             for (let i = 0; i < value.length; i += CHUNK_SIZE) {
                 const subChunk = value.slice(i, i + CHUNK_SIZE);
-                const iv = crypto.getRandomValues(new Uint8Array(12));
-                cryptoWorker.postMessage({ type: 'ENCRYPT', chunk: subChunk, iv, key: transfer.key }, [subChunk.buffer || subChunk]);
                 
-                if (currentConn.dataChannel.bufferedAmount > 2097152) {
-                    await new Promise(r => currentConn.dataChannel.onbufferedamountlow = r);
-                }
-                updateUI(transfer.bytes + subChunk.byteLength, selectedFile.size);
+                // Use the Worker for encryption to keep UI smooth
+                const encryptedData = await new Promise((resolve) => {
+                    const iv = crypto.getRandomValues(new Uint8Array(12));
+                    const handleWorker = (e) => {
+                        if (e.data.type === 'CHUNK_READY') {
+                            cryptoWorker.removeEventListener('message', handleWorker);
+                            resolve(e.data);
+                        }
+                    };
+                    cryptoWorker.addEventListener('message', handleWorker);
+                    cryptoWorker.postMessage({ 
+                        type: 'ENCRYPT', 
+                        chunk: subChunk, 
+                        key: transfer.key, 
+                        iv: iv 
+                    }, [subChunk]);
+                });
+
+                // Set up ACK listener BEFORE sending
+                const ackPromise = new Promise((resolve) => {
+                    const handler = (data) => {
+                        if (data.type === 'ACK_NEXT') {
+                            currentConn.off('data', handler);
+                            resolve();
+                        }
+                    };
+                    currentConn.on('data', handler);
+                });
+
+                currentConn.send({ chunk: encryptedData.encrypted, iv: Array.from(encryptedData.iv) });
+                
+                await ackPromise; // Wait for receiver to process
+
+                transfer.bytes += subChunk.byteLength;
+                updateUI(transfer.bytes, selectedFile.size);
             }
         }
         currentConn.send({ type: 'done', finalHash: transfer.hash });
         logHistory(selectedFile.name, selectedFile.size, 'sent');
         setTimeout(resetTransfer, 1000);
+    } catch (err) {
+        console.error("Transfer error:", err);
+        resetTransfer();
     }
+}
 
     async function handleFileRequest(data) {
-    transfer = { chunks: [], name: data.name, size: data.size, bytes: 0, hash: data.hash, startTime: Date.now() };
+    transfer = { 
+        chunks: [], 
+        name: data.name, 
+        size: data.size,
+        bytes: 0, 
+        hash: data.hash, 
+        startTime: Date.now(),
+        writable: null,
+        controller: null
+    };
     transfer.key = await crypto.subtle.importKey("jwk", data.keyData, { name: "AES-GCM" }, true, ["decrypt"]);
 
     document.getElementById('modal-overlay').style.display = 'flex';
@@ -467,62 +560,94 @@ function setupConnection(conn) {
     };
 
     document.getElementById('accept-btn').onclick = async () => {
-        document.getElementById('modal-overlay').style.display = 'none';
-        updateStatus(`Receiving...`, true);
-        
-        // 1. Preferred: File System Access API (Chrome/Edge desktop)
+    document.getElementById('modal-overlay').style.display = 'none';
+    
+    transfer.bytes = 0;
+    transfer.chunks = [];
+    transfer.startTime = Date.now();
+    document.getElementById('progress-area').style.display = 'block';
+
+    try {
         if ('showSaveFilePicker' in window) {
-            try {
-                const handle = await window.showSaveFilePicker({ suggestedName: data.name });
-                transfer.writable = await handle.createWritable();
-            } catch(e) { return; } // User cancelled
+            const handle = await window.showSaveFilePicker({ suggestedName: transfer.name });
+            transfer.writable = await handle.createWritable();
+            transfer.controller = null;
         } 
-        // 2. Secondary: Service Worker Stream (Firefox/Safari/Mobile)
         else if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-            const { readable, writable } = new TransformStream();
-            transfer.writable = writable; 
-            transfer.controller = writable.getWriter();
-            
+            const ts = new TransformStream();
+            transfer.writable = ts.writable; 
+            transfer.controller = ts.writable.getWriter(); 
+
             navigator.serviceWorker.controller.postMessage({
                 type: 'INITIALIZE_STREAM',
-                fileName: data.name,
-                fileSize: data.size,
-                readableStream: readable
-            }, [readable]); // <--- MUST be in this array to transfer ownership
+                fileName: transfer.name,
+                fileSize: transfer.size,
+                readableStream: ts.readable 
+            }, [ts.readable]);
 
-            // Trigger the browser's download manager
+            await new Promise(r => setTimeout(r, 200));
+
             const a = document.createElement('a');
-            a.href = `/download-p2p/${encodeURIComponent(data.name)}`;
+            a.href = `/download-p2p/${encodeURIComponent(transfer.name)}`;
+            document.body.appendChild(a);
             a.click();
+            document.body.removeChild(a);
+        } else {
+            // RAM Fallback
+            transfer.writable = null;
+            transfer.controller = null;
         }
-        // 3. Fallback: RAM (Incognito/Old browsers)
-        else {
-            transfer.writable = null; 
-        }
-
+        
         isBusy = true; 
         refreshUI();
-        document.getElementById('progress-area').style.display = 'block';
-        currentConn.send({ type: 'start_now' });
-    };
+
+        await new Promise(r => setTimeout(r, 400)); 
+
+        currentConn.send({ type: 'receiver_ready' }); 
+    } catch (e) {
+        console.error("Setup failed:", e);
+        resetTransfer();
+    }
+};
 }
 
     async function finalizeFile(incomingHash) {
-        if (transfer.writable) {
-            if (transfer.writable.close) await transfer.writable.close();
-            else await transfer.controller.close();
-        } else {
+    await new Promise(r => setTimeout(r, 500));
+    
+    console.log("Finalizing. Total bytes received:", transfer.bytes);
+    
+    // 1. Close the streams first to save the file to disk
+    if (transfer.controller) {
+        await transfer.controller.close();
+    } else if (transfer.writable) {
+        await transfer.writable.close();
+    }
+
+    // 2. INTEGRITY CHECK: Compare received bytes vs expected size
+    if (transfer.bytes > 0) {
+        if (transfer.bytes !== transfer.size) {
+            alert(`Warning: Received ${transfer.bytes} bytes, but expected ${transfer.size}. The file may be corrupted.`);
+        }
+
+        // 3. Handle RAM Fallback if not using FileSystem API
+        if (!transfer.writable && !transfer.controller) {
             const blob = new Blob(transfer.chunks);
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
             a.download = transfer.name;
             a.click();
         }
+        
         logHistory(transfer.name, transfer.size, 'received');
-        resetTransfer();
+    } else {
+        alert("Transfer failed: No data received.");
     }
+    
+    setTimeout(resetTransfer, 1000);
+}
 
     function updateUI(cur, tot) {
+        if (!tot || tot === 0) return;
         const p = Math.min(Math.round((cur / tot) * 100), 100) || 0;
         document.getElementById('progress-bar').value = p;
         document.getElementById('progress-text').innerText = p + "%";
@@ -557,15 +682,20 @@ function setupConnection(conn) {
     zone.addEventListener('click', () => { if(!isBusy) document.getElementById('file-input').click(); });
 
     function resetTransfer() {
-        isBusy = false;
-        if (wakeLock) { wakeLock.release(); wakeLock = null; }
-        document.getElementById('progress-area').style.display = 'none';
-        document.getElementById('file-label').innerText = "Drag & Drop or Tap to select";
-        document.getElementById('drop-zone').classList.remove('has-file');
-        selectedFile = null;
-        transfer = { chunks: [], writable: null, controller: null };
-        refreshUI();
-    }
+    isBusy = false;
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+    document.getElementById('progress-area').style.display = 'none';
+    
+    document.getElementById('progress-bar').value = 0;
+    document.getElementById('progress-text').innerText = "0%";
+    document.getElementById('speed-text').innerText = "0.0 MB/s";
+    
+    document.getElementById('file-label').innerText = "Drag & Drop or Tap to select";
+    document.getElementById('drop-zone').classList.remove('has-file');
+    selectedFile = null;
+    transfer = { chunks: [], writable: null, controller: null, bytes: 0, size: 0 };
+    refreshUI();
+}
 
     function disconnectPeer() {
         if (currentConn) currentConn.close();
