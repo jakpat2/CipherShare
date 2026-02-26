@@ -438,23 +438,15 @@ function setupConnection(conn) {
     // --- RECEIVER LOGIC ---
     if (type === 'DECRYPTED_READY') {
     const data = new Uint8Array(decrypted);
-    
-    try {
-        if (transfer.controller) {
-            // This sends the data to the Service Worker download
-            await transfer.controller.write(data);
-            
-            // Increment bytes AFTER successful write
+    if (transfer.controller) {
+        try {
+            transfer.controller.enqueue(data);
             transfer.bytes += data.byteLength;
             updateUI(transfer.bytes, transfer.size);
-
-            // Tell sender we are ready for the next piece
             currentConn.send({ type: 'ACK_NEXT' }); 
-        } else {
-            console.error("No stream controller found!");
+        } catch (e) {
+            console.error("Stream closed or error:", e);
         }
-    } catch (err) {
-        console.error("Stream Write Error:", err);
     }
 }
 };
@@ -566,31 +558,43 @@ function setupConnection(conn) {
     document.getElementById('accept-btn').onclick = async () => {
     document.getElementById('modal-overlay').style.display = 'none';
     
-    const ts = new TransformStream();
-    transfer.controller = ts.writable.getWriter();
+    // Create the "Pipe" manually
+    const stream = new ReadableStream({
+        start(controller) {
+            transfer.controller = controller;
+        }
+    });
 
-    // Create a MessageChannel to hear back from the Service Worker
-    const msgChan = new MessageChannel();
-    
-    // 1. Tell the worker about the stream
+    // Wait for the Service Worker to acknowledge
+    const swReady = new Promise(resolve => {
+        const handler = (e) => {
+            if (e.data.type === 'STREAM_READY') {
+                navigator.serviceWorker.removeEventListener('message', handler);
+                resolve();
+            }
+        };
+        navigator.serviceWorker.addEventListener('message', handler);
+    });
+
     navigator.serviceWorker.controller.postMessage({
         type: 'INITIALIZE_STREAM',
         fileName: transfer.name,
         fileSize: transfer.size,
-        readableStream: ts.readable 
-    }, [ts.readable]);
+        readableStream: stream 
+    }, [stream]); // Transfer ownership of the stream
 
-    // 2. WAIT A MOMENT: Give the SW a chance to register the stream in its Map
-    await new Promise(r => setTimeout(r, 500)); 
+    await swReady;
 
-    // 3. NOW trigger the download
-    const downloadUrl = `./download-p2p/${encodeURIComponent(transfer.name)}`;
-    window.location.href = downloadUrl;
+    // Trigger download
+    window.location.href = `./download-p2p/${encodeURIComponent(transfer.name)}`;
     
-    // 4. Signal the sender to start blasting data
-    await new Promise(r => setTimeout(r, 1500));
-    currentConn.send({ type: 'receiver_ready' });
-    document.getElementById('progress-area').style.display = 'block';
+    // Delay slightly to ensure browser has opened the file before sending chunks
+    setTimeout(() => {
+        isBusy = true;
+        refreshUI();
+        currentConn.send({ type: 'receiver_ready' });
+        document.getElementById('progress-area').style.display = 'block';
+    }, 1200);
 };
 }
 
