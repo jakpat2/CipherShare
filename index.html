@@ -562,15 +562,13 @@ function setupConnection(conn) {
     document.getElementById('modal-overlay').style.display = 'none';
     
     try {
-        if ('showSaveFilePicker' in window) {
-            const handle = await window.showSaveFilePicker({ suggestedName: transfer.name });
-            transfer.writable = await handle.createWritable();
-        } 
-        else if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        // Force the Service Worker path for mobile stability
+        if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
             const ts = new TransformStream();
             transfer.writable = ts.writable; 
             transfer.controller = ts.writable.getWriter(); 
 
+            // 1. Tell the worker to prepare the stream
             navigator.serviceWorker.controller.postMessage({
                 type: 'INITIALIZE_STREAM',
                 fileName: transfer.name,
@@ -578,23 +576,23 @@ function setupConnection(conn) {
                 readableStream: ts.readable 
             }, [ts.readable]);
 
-            const a = document.createElement('a');
-            a.href = `./download-p2p/${encodeURIComponent(transfer.name)}`;
-            a.click();
+            // 2. IMMEDIATE user gesture to trigger the download
+            const url = `./download-p2p/${encodeURIComponent(transfer.name)}`;
+            window.location.href = url;
             
-            // Give the Mobile OS 2 seconds to finish opening the "Save As" prompt
+            // 3. Wait for the browser "Save" UI to finish popping up
             await new Promise(r => setTimeout(r, 2000));
+        } else {
+            throw new Error("Service Worker not active. Please refresh.");
         }
 
         isBusy = true; 
         refreshUI();
-        
-        // Final "I'm ready" signal
-        console.log("Receiver ready, signaling sender...");
         currentConn.send({ type: 'receiver_ready' }); 
         
     } catch (e) {
         console.error("Setup failed:", e);
+        alert("Mobile Download Failed: " + e.message);
         resetTransfer();
     }
 };
