@@ -6,7 +6,6 @@ const ASSETS = [
 ];
 
 // Map to store active stream controllers
-// sw.js
 const streamMap = new Map();
 
 self.addEventListener('install', () => self.skipWaiting());
@@ -15,13 +14,8 @@ self.addEventListener('activate', (e) => e.waitUntil(clients.claim()));
 self.onmessage = (event) => {
     if (event.data.type === 'INITIALIZE_STREAM') {
         const { fileName, fileSize, readableStream } = event.data;
-        // Store the actual stream object
         streamMap.set(fileName, { stream: readableStream, size: fileSize });
-        
-        // Confirm receipt so the main page can trigger the download
-        if (event.source) {
-            event.source.postMessage({ type: 'STREAM_READY', fileName });
-        }
+        if (event.source) event.source.postMessage({ type: 'STREAM_READY' });
     }
 };
 
@@ -30,9 +24,8 @@ self.addEventListener('fetch', (event) => {
     if (url.pathname.includes('/download-p2p/')) {
         const fileName = decodeURIComponent(url.pathname.split('/').pop());
         const data = streamMap.get(fileName);
-
         if (data) {
-            streamMap.delete(fileName); // Prevent memory leaks
+            streamMap.delete(fileName);
             const headers = new Headers({
                 'Content-Type': 'application/octet-stream',
                 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
