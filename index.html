@@ -562,16 +562,10 @@ function setupConnection(conn) {
     document.getElementById('accept-btn').onclick = async () => {
     document.getElementById('modal-overlay').style.display = 'none';
     
-    transfer.bytes = 0;
-    transfer.chunks = [];
-    transfer.startTime = Date.now();
-    document.getElementById('progress-area').style.display = 'block';
-
     try {
         if ('showSaveFilePicker' in window) {
             const handle = await window.showSaveFilePicker({ suggestedName: transfer.name });
             transfer.writable = await handle.createWritable();
-            transfer.controller = null;
         } 
         else if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
             const ts = new TransformStream();
@@ -585,27 +579,26 @@ function setupConnection(conn) {
                 readableStream: ts.readable 
             }, [ts.readable]);
 
-            await new Promise(r => setTimeout(r, 200));
-
+            // GIVE THE DEVICE TIME TO OPEN THE DOWNLOAD
             const a = document.createElement('a');
-            a.href = `/download-p2p/${encodeURIComponent(transfer.name)}`;
+            a.href = `./download-p2p/${encodeURIComponent(transfer.name)}`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-        } else {
-            // RAM Fallback
-            transfer.writable = null;
-            transfer.controller = null;
+            
+            // CRITICAL: Wait 1 second here to ensure the browser 
+            // has initialized the download before telling the sender to start.
+            await new Promise(r => setTimeout(r, 1000));
         }
-        
+
         isBusy = true; 
         refreshUI();
-
-        await new Promise(r => setTimeout(r, 400)); 
-
+        
+        // Final "I'm ready" signal
         currentConn.send({ type: 'receiver_ready' }); 
+        
     } catch (e) {
-        console.error("Setup failed:", e);
+        console.error("User canceled or Setup failed:", e);
         resetTransfer();
     }
 };
