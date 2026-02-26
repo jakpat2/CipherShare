@@ -31,21 +31,16 @@ self.addEventListener('fetch', (event) => {
             const headers = new Headers({
                 'Content-Type': 'application/octet-stream',
                 'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-                'Content-Length': streamData.size,
                 'Cache-Control': 'no-cache',
                 'X-Content-Type-Options': 'nosniff'
             });
 
             event.respondWith(new Response(streamData.stream, { headers }));
-            return;
+        } else {
+            event.respondWith(new Response("Stream not initialized", { status: 404 }));
         }
+        return;
     }
-
-    event.respondWith(
-        caches.match(event.request).then((response) => {
-            return response || fetch(event.request);
-        })
-    );
 });
 
 self.onmessage = (event) => {
