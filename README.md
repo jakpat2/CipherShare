@@ -28,3 +28,5 @@ CipherShare is a specialized web tool designed for secure, direct file sharing. 
 2.  **Key Exchange**: A secure session key is generated and shared via the encrypted signaling channel.
 3.  **Chunking**: The file is broken into small pieces to maintain memory efficiency.
 4.  **Transfer**: Chunks are encrypted, sent via the WebRTC DataChannel, and decrypted in real-time on the receiver's end.
+
+**By jakpat**
