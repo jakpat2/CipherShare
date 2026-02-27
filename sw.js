@@ -5,71 +5,69 @@ const ASSETS = [
     'CipherShare-logo.png'
 ];
 
-// Map to store active stream controllers
-const streamMap = new Map();
+// Map to store active stream controllers and metadata
+const streams = new Map();
+const controllers = new Map();
 
-self.addEventListener('install', (event) => {
-    // Force the waiting service worker to become the active service worker
-    self.skipWaiting();
-    event.waitUntil(
-        caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
-    );
-});
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
-self.addEventListener('activate', (event) => {
-    // Ensure the SW takes control of the page immediately
-    event.waitUntil(clients.claim());
+self.addEventListener('message', (event) => {
+    const { type, fileName, fileSize, realName, chunk } = event.data;
+
+    if (type === 'INITIALIZE_STREAM') {
+        const stream = new ReadableStream({
+            start(controller) {
+                controllers.set(fileName, controller);
+            }
+        });
+        streams.set(fileName, { stream, size: fileSize, realName });
+        
+        event.source.postMessage({ type: 'SW_READY', fileName });
+    }
+
+    if (type === 'STREAM_CHUNK') {
+        const controller = controllers.get(fileName);
+        if (controller) {
+            controller.enqueue(chunk);
+        }
+    }
+
+    if (type === 'CLOSE_STREAM') {
+        const controller = controllers.get(fileName);
+        if (controller) {
+            controller.close();
+            controllers.delete(fileName);
+            streams.delete(fileName); 
+        }
+    }
 });
 
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
+    
+    if (url.pathname.includes('download-p2p')) {
+        const segments = url.pathname.split('/');
+        const streamId = segments[segments.length - 1];
+        const data = streams.get(streamId);
 
-    // Intercept the virtual download URL
-    if (url.pathname.includes('download-p2p/')) {
-        const fileName = decodeURIComponent(url.pathname.split('/').pop());
-        const streamData = streamMap.get(fileName);
-
-        if (streamData) {
-            // Clean up the map after retrieval to prevent memory leaks
-            streamMap.delete(fileName);
+        if (data) {
+            // Log for debugging
+            console.log("SW: Intercepting download for", data.realName);
 
             const headers = new Headers({
                 'Content-Type': 'application/octet-stream',
-                'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`,
-                'Content-Length': streamData.size, // CRITICAL: Tells mobile browsers the file size
-                'Cache-Control': 'no-cache',
-                'X-Content-Type-Options': 'nosniff' // Prevents browser from "sniffing" and buffering RAM
+                'Content-Disposition': `attachment; filename="${data.realName}"`,
+                'Content-Length': data.size,
+                // Critical: prevent browser from timing out or "guessing" the content
+                'Cache-Control': 'no-cache, no-store, must-revalidate',
+                'X-Content-Type-Options': 'nosniff'
             });
 
-            // Return the stream as a standard HTTP Response
-            event.respondWith(new Response(streamData.stream, { headers }));
+            event.respondWith(new Response(data.stream, { headers }));
         } else {
-            // If the user refreshes or the map is cleared, return 404
-            event.respondWith(new Response("Stream expired or not found. Please restart transfer.", { status: 404 }));
+            console.warn("SW: Stream ID not found", streamId);
+            event.respondWith(new Response('Stream not found', { status: 404 }));
         }
-    } else {
-        // Standard cache-first strategy for app assets
-        event.respondWith(
-            caches.match(event.request).then((response) => {
-                return response || fetch(event.request);
-            })
-        );
     }
 });
-
-self.onmessage = (event) => {
-    if (event.data.type === 'INITIALIZE_STREAM') {
-        const { fileName, fileSize, readableStream } = event.data;
-
-        // Store the stream and size for the fetch event to pick up
-        streamMap.set(fileName, { 
-            stream: readableStream, 
-            size: fileSize 
-        });
-
-        // Acknowledge the main thread
-        if (event.ports && event.ports[0]) {
-            event.ports[0].postMessage({ status: 'READY' });
-        }
-    }
-};
