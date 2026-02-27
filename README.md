@@ -1,3 +1,4 @@
+##CipherShare doesn't work currently! Please wait for the fix before using.
 # 🛡️ CipherShare
 **High-Performance, End-to-End Encrypted P2P File Transfer**
 
