@@ -943,14 +943,14 @@ function autoConnect(id) {
     clearTimeout(connectionTimeout);
     updateStatus("Typing ID...", true);
 
-    // Wait 700ms after the last character is typed
+    // Wait 900ms after the last character is typed
     connectionTimeout = setTimeout(() => {
         if (cleanId.length > 5) { // Basic safety check for ID length
             lastAttemptedId = cleanId;
             updateStatus("Connecting...", true);
             setupConnection(peer.connect(cleanId));
         }
-    }, 700);
+    }, 900);
 }
 
 let html5Scanner = null;
@@ -1038,3 +1038,4 @@ document.getElementById('chat-input').addEventListener('input', () => {
 </script>
 </body>
 </html>
+
