@@ -1,9 +1,35 @@
 const CACHE_NAME = 'ciphershare';
-const ASSETS = [
+const ASSETS_TO_CACHE = [
+    '/',
     'index.html',
     'manifest.json',
     'CipherShare-logo.png'
 ];
+
+self.addEventListener('install', (event) => {
+    event.waitUntil(
+        caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS_TO_CACHE))
+    );
+    self.skipWaiting();
+});
+
+// Update your existing fetch listener to also handle the cache
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+    
+    // Keep your existing P2P streaming logic
+    if (url.pathname.includes('download-p2p')) {
+        /* ... your existing streaming code ... */
+        return; 
+    }
+
+    // New: Offline support for app files
+    event.respondWith(
+        caches.match(event.request).then((response) => {
+            return response || fetch(event.request);
+        })
+    );
+});
 
 // Map to store active stream controllers and metadata
 const streams = new Map();
