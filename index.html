@@ -256,7 +256,7 @@ progress::-webkit-progress-value {
     <div class="id-badge" id="my-id" onclick="copyMyId()" title="Click to copy">---</div>
     <div id="qrcode" style="display:none; background:white; padding:12px; margin: 15px auto; width: fit-content; border-radius:8px; line-height: 0;"></div>
     
-    <input type="text" id="remote-id" placeholder="Paste Peer ID" oninput="autoConnect(this.value)">
+    <input type="text" id="remote-id" placeholder="Paste Peer ID" oninput="autoConnect(this.value)" autocomplete="off">
     <button style="background:#475569" onclick="toggleScanner()">📷 Scan QR</button>
     <div id="reader"></div>
 
@@ -627,6 +627,14 @@ if (type === 'DECRYPTED_READY') {
 }
 
 async function beginSending() {
+    // Request Wake Lock
+    try {
+        if ('wakeLock' in navigator) {
+            wakeLock = await navigator.wakeLock.request('screen');
+        }
+    } catch (err) { console.error("Wake Lock failed:", err); }
+
+//
     let offset = 0;
     const chunkSize = 1024 * 1024; // 1MB
     let activeAcks = 0;
@@ -646,6 +654,21 @@ async function beginSending() {
                 };
                 window.addEventListener('next_chunk', helper);
             });
+            
+            const dc = currentConn.dataChannel || currentConn._dc; // Access underlying data channel
+            dc.onerror = (err) => {
+    console.error("Data Channel Error:", err);
+    appendMessage("❌ Connection lost. Transfer aborted.", "system");
+    resetTransfer();
+};
+if (dc && dc.bufferedAmount > 16 * 1024 * 1024) { // 16MB Buffer limit
+    await new Promise(resolve => {
+        dc.onbufferedamountlow = () => {
+            dc.onbufferedamountlow = null;
+            resolve();
+        };
+    });
+}
         }
 
         const chunk = selectedFile.slice(offset, offset + chunkSize);
@@ -719,25 +742,48 @@ async function beginSending() {
 }
 
     async function finalizeFile() {
+    let finalBlob;
+    
     if (window.fileWritableStream) {
-        // Desktop cleanup
+        // Desktop: Finalize the direct-to-disk stream
         await window.fileWritableStream.close();
         window.fileWritableStream = null;
+        appendMessage(`✅ ${transfer.name} saved directly to disk!`, 'system');
     } else {
-        // Mobile: Create a giant Blob and trigger a download
-        const fileBlob = new Blob(transfer.chunks);
-        const url = URL.createObjectURL(fileBlob);
+        // Mobile/Safari: Assemble chunks and verify hash
+        finalBlob = new Blob(transfer.chunks);
+        
+        // 1. Integrity Verification
+        const arrayBuffer = await finalBlob.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        const finalHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+        if (finalHash !== transfer.hash) {
+            appendMessage("⚠️ Warning: File hash mismatch! Data may be corrupt.", 'system');
+        } else {
+            appendMessage("🛡️ Integrity Verified: SHA-256 Checksum matches.", 'system');
+        }
+
+        // 2. Trigger Download
+        const url = URL.createObjectURL(finalBlob);
         const a = document.createElement('a');
         a.href = url;
         a.download = transfer.name;
         a.click();
         URL.revokeObjectURL(url);
+        appendMessage(`✅ ${transfer.name} download triggered.`, 'system');
     }
     
-    appendMessage(`✅ ${transfer.name} saved!`, 'system');
+    // UI Cleanup
     document.getElementById('progress-area').style.display = 'none';
     updateStatus("Transfer Complete", true);
-    logHistory(transfer.name, transfer.size, 'received');
+    
+    logHistory(transfer.name, transfer.size, 'received', true); 
+    
+    if (wakeLock) {
+        try { await wakeLock.release(); wakeLock = null; } catch(e) {}
+    }
     setTimeout(resetTransfer, 2000);
 }
 
@@ -816,6 +862,11 @@ lastTime = Date.now();
 }
 
 function disconnectPeer() {
+    if (isBusy && transfer.name) {
+        // If we were in the middle of a transfer, log it as a failure
+        logHistory(transfer.name, transfer.size, 'transfer', false);
+    }
+
     if (currentConn) {
         currentConn.close();
         currentConn = null;
@@ -838,14 +889,26 @@ function disconnectPeer() {
 }
 
 function updateStatus(txt, on) {
-    document.getElementById('status-text').innerText = txt;
+    const statusText = document.getElementById('status-text');
+    statusText.innerText = on ? `${txt}` : txt;
     document.getElementById('status-dot').className = on ? 'dot online' : 'dot';
 }
 
-function logHistory(name, size, type) {
+function logHistory(name, size, type, isSuccess) {
     const item = document.createElement('div');
     item.className = 'history-item';
-    item.innerHTML = `<strong>${type === 'sent' ? '📤' : '📥'}</strong> ${name} (${(size / 1048576).toFixed(1)}MB)`;
+    
+    // Determine the icon and color based on status
+    const statusIcon = isSuccess ? '<span style="color:var(--success)">✅</span>' : '<span style="color:#ef4444">❌</span>';
+    const directionIcon = type === 'sent' ? '📤' : '📥';
+    
+    item.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span><strong>${directionIcon}</strong> ${name} (${(size / 1048576).toFixed(1)}MB)</span>
+            ${statusIcon}
+        </div>
+    `;
+    
     document.getElementById('history-list').prepend(item);
 }
 
@@ -869,10 +932,25 @@ function renameDevice() {
     }
 }
 
+let connectionTimeout;
+let lastAttemptedId = "";
+
 function autoConnect(id) {
-    if (id.length > 10 && (!currentConn || !currentConn.open)) {
-        setupConnection(peer.connect(id));
-    }
+    const cleanId = id.trim();
+    // Don't try to connect if the ID is empty, hasn't changed, or we are already connected
+    if (!cleanId || cleanId === lastAttemptedId || (currentConn && currentConn.open)) return;
+
+    clearTimeout(connectionTimeout);
+    updateStatus("Typing ID...", true);
+
+    // Wait 700ms after the last character is typed
+    connectionTimeout = setTimeout(() => {
+        if (cleanId.length > 5) { // Basic safety check for ID length
+            lastAttemptedId = cleanId;
+            updateStatus("Connecting...", true);
+            setupConnection(peer.connect(cleanId));
+        }
+    }, 700);
 }
 
 let html5Scanner = null;
