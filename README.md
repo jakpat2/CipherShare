@@ -1,4 +1,4 @@
-# 🛡️ CipherShare
+# 🛡️ CipherShare 
 **High-Performance, End-to-End Encrypted P2P File Transfer & Chat**
 
 ![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)
