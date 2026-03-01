@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ciphershare0';
+const CACHE_NAME = 'ciphershare';
 const ASSETS_TO_CACHE = [
     '/',
     'index.html',
@@ -97,4 +97,5 @@ self.addEventListener('fetch', (event) => {
         }
     }
 });
+
 
