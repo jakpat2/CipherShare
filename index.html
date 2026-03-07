@@ -37,6 +37,7 @@ html, body {
         body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
         .user-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; font-size: 0.75rem; color: #94a3b8; }
         .status-bar { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 1rem; font-size: 0.8rem; }
+        #status-text {transition: color 0.3s ease;}
         .dot { height: 8px; width: 8px; background-color: #ef4444; border-radius: 50%; }
         .dot.online { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
         .id-badge { background: #334155; padding: 10px; border-radius: 8px; font-family: monospace; color: var(--primary); margin-bottom: 10px; font-size: 0.8rem; cursor: pointer; word-break: break-all; border: 1px solid transparent; transition: 0.2s; }
@@ -427,17 +428,23 @@ const peer = new Peer({
 
     peer.on('connection', conn => { if (!currentConn?.open) setupConnection(conn); });
 
-    peer.on('error', (err) => {
+peer.on('error', (err) => {
     console.error('PeerJS Error Type:', err.type);
     const statusText = document.getElementById('status-text');
     const statusDot = document.getElementById('status-dot');
 
     if (err.type === 'network') {
-        statusText.innerText = "Network Error: PeerJS Blocked";
-        statusDot.className = 'dot';
-        alert("Connection to signaling server blocked by your network/firewall.");
+        // This handles firewall/network blocks
+        updateStatus("Network Error: PeerJS Blocked", false);
+    } else if (err.type === 'peer-not-found') {
+        // This handles "wrong ID" errors specifically
+        updateStatus("ID not found. Check and try again.", false);
+        lastAttemptedId = ""; // Reset so the user can try the same ID again if they misclicked
+    } else if (err.type === 'unavailable-id') {
+        updateStatus("ID is already taken.", false);
     } else {
-        alert('Connection Error: ' + err.type);
+        // General fallback for other errors
+        updateStatus("Connection Error: " + err.type, false);
     }
 });
 
@@ -486,30 +493,33 @@ function setupConnection(conn) {
         }
 
         // 3. Handle File Transfer Logic
-        if (data.type) {
-            if (data.type === 'identity') {
-                partnerName = data.name;
-                updateStatus(`Connected to ${partnerName}`, true);
-            } 
-            else if (data.type === 'request') { handleFileRequest(data); } 
-            else if (data.type === 'receiver_ready') { beginSending(); } 
-            else if (data.type === 'done') { finalizeFile(); }
-            else if (data.type === 'ACK_NEXT') { 
-                window.dispatchEvent(new CustomEvent('next_chunk')); 
-            }
-            // MOVE THIS HERE (Inside the if(data.type) block)
-            else if (data.type === 'DISK_WRITE_DONE') {
-                document.getElementById('progress-area').style.display = 'none';
-                updateStatus("Connected", true);
-            }
+if (data.type) {
+    if (data.type === 'identity') {
+        partnerName = data.name;
+        updateStatus(`Connected to ${partnerName}`, true);
+    } 
+    else if (data.type === 'request') { handleFileRequest(data); } 
+    else if (data.type === 'receiver_ready') { beginSending(); } 
+    else if (data.type === 'done') { finalizeFile(); }
+    else if (data.type === 'ACK_NEXT') { 
+        // THIS LINE IS CRITICAL: It wakes up the beginSending loop
+        window.dispatchEvent(new CustomEvent('next_chunk')); 
+    }
+    else if (data.type === 'DISK_WRITE_DONE') {
+        document.getElementById('progress-area').style.display = 'none';
+        updateStatus("Connected", true);
+    }
             else if (data.type === 'receiver_finished_all') {
-                appendMessage(`✅ ${selectedFile.name} sent and saved!`, 'system');
-                logHistory(selectedFile.name, selectedFile.size, 'sent');
-                setTimeout(() => {
-                    resetTransfer();
-                    updateStatus("Ready for next file", false);
-                }, 2000);
-            }
+    // 1. Log the SUCCESS first
+    logHistory(selectedFile.name, selectedFile.size, 'sent', true); 
+    
+    appendMessage(`✅ ${selectedFile.name} sent and saved!`, 'system');
+    
+    // 2. Wait a bit before resetting
+    setTimeout(() => {
+        resetTransfer();
+    }, 2000);
+}
             return; // Exit here if it was a "type" message
         }
         
@@ -522,21 +532,6 @@ function setupConnection(conn) {
                 key: transfer.key 
             });
         }
-    
-if (data.type === 'ACK_NEXT') {
-    // This wakes up the 'await new Promise' in the sender loop
-    window.dispatchEvent(new CustomEvent('next_chunk'));
-} 
-else if (data.type === 'receiver_finished_all') {
-    // This is the final signal that the receiver's disk is closed
-    appendMessage(`📤 ${selectedFile.name} sent and saved!`, 'system');
-    logHistory(selectedFile.name, selectedFile.size, 'sent');
-    
-    setTimeout(() => {
-        resetTransfer();
-        updateStatus("Ready for next file", false);
-    }, 2000);
-}
 });
 
     currentConn.on('close', disconnectPeer);
@@ -634,7 +629,7 @@ async function beginSending() {
         }
     } catch (err) { console.error("Wake Lock failed:", err); }
 
-//
+    //
     let offset = 0;
     const chunkSize = 1024 * 1024; // 1MB
     let activeAcks = 0;
@@ -657,29 +652,24 @@ async function beginSending() {
             
             const dc = currentConn.dataChannel || currentConn._dc; // Access underlying data channel
             dc.onerror = (err) => {
-    console.error("Data Channel Error:", err);
-    appendMessage("❌ Connection lost. Transfer aborted.", "system");
-    resetTransfer();
-};
-if (dc && dc.bufferedAmount > 16 * 1024 * 1024) { // 16MB Buffer limit
-    await new Promise(resolve => {
-        dc.onbufferedamountlow = () => {
-            dc.onbufferedamountlow = null;
-            resolve();
-        };
-    });
-}
+                console.error("Data Channel Error:", err);
+                appendMessage("❌ Connection lost. Transfer aborted.", "system");
+                resetTransfer();
+            };
+
+            if (dc && dc.bufferedAmount > 16 * 1024 * 1024) { // 16MB Buffer limit
+                await new Promise(resolve => {
+                    dc.onbufferedamountlow = () => {
+                        dc.onbufferedamountlow = null;
+                        resolve();
+                    };
+                });
+            }
         }
 
         const chunk = selectedFile.slice(offset, offset + chunkSize);
         const buffer = await chunk.arrayBuffer();
         const encrypted = await encryptChunk(buffer); 
-
-        activeAcks++;
-        currentConn.send({
-            chunk: encrypted.data,
-            iv: encrypted.iv
-        });
 
         // This listener reduces the count when the receiver confirms a disk write
         const handleAck = () => {
@@ -687,6 +677,12 @@ if (dc && dc.bufferedAmount > 16 * 1024 * 1024) { // 16MB Buffer limit
             window.removeEventListener('next_chunk', handleAck);
         };
         window.addEventListener('next_chunk', handleAck);
+
+        activeAcks++;
+        currentConn.send({
+            chunk: encrypted.data,
+            iv: encrypted.iv
+        });
 
         offset += chunkSize;
         updateUI(offset, selectedFile.size);
@@ -859,12 +855,13 @@ function updateUI(cur, tot) {
 lastTime = Date.now();
     
     refreshUI();
+    updateStatus("Ready for next file", true);
 }
 
 function disconnectPeer() {
-    if (isBusy && transfer.name) {
-        // If we were in the middle of a transfer, log it as a failure
-        logHistory(transfer.name, transfer.size, 'transfer', false);
+    // Only log a failure if the connection dropped WHILE we were actually transferring
+    if (isBusy && transfer.bytes < transfer.size && transfer.size > 0) {
+        logHistory(transfer.name, transfer.size, 'sent', false);
     }
 
     if (currentConn) {
@@ -937,20 +934,26 @@ let lastAttemptedId = "";
 
 function autoConnect(id) {
     const cleanId = id.trim();
-    // Don't try to connect if the ID is empty, hasn't changed, or we are already connected
-    if (!cleanId || cleanId === lastAttemptedId || (currentConn && currentConn.open)) return;
+    
+    // If the input is empty, reset the status to Online
+    if (!cleanId) {
+        updateStatus("Online", true);
+        lastAttemptedId = "";
+        return;
+    }
+
+    if (cleanId === lastAttemptedId || (currentConn && currentConn.open)) return;
 
     clearTimeout(connectionTimeout);
     updateStatus("Typing ID...", true);
 
-    // Wait 900ms after the last character is typed
     connectionTimeout = setTimeout(() => {
-        if (cleanId.length > 5) { // Basic safety check for ID length
+        if (cleanId.length > 5) { 
             lastAttemptedId = cleanId;
-            updateStatus("Connecting...", true);
+            updateStatus("Connecting to " + cleanId + "...", true);
             setupConnection(peer.connect(cleanId));
         }
-    }, 900);
+    }, 400); // Auto connect delay
 }
 
 let html5Scanner = null;
@@ -1038,4 +1041,3 @@ document.getElementById('chat-input').addEventListener('input', () => {
 </script>
 </body>
 </html>
-
